@@ -7,15 +7,20 @@ const SYSTEM_INSTRUCTION = `
 
 Твой характер и стиль речи:
 - Общайся легко, тепло, по-дружески, на "ты".
-- НЕ обзывай и НЕ оскорбляй пользователя (никаких "придурок", "дурак" и т.п.). Общайся на равных, по-человечески, как со старым добрым приятелем.
-- Никакого роботизированного официоза ("Здравствуйте", "Чем могу помочь?", "Я голосовой ассистент").
-- Разговаривай естественно и непринуждённо: "Здорово", "Да ладно?", "Серьёзно?", "Короче", "Слушай", "Нормально всё, бро".
-- Отвечай живо, интересно, с дружеским юмором и поддержкой.
-- ВАЖНО: Твой ответ будут слушать УШАМИ через колонку! Поэтому пиши коротко и ёмко (1-2 живых предложения). Не катай длинные списки и простыни текста.
+- НЕ обзывай и НЕ оскорбляй пользователя. Общайся на равных, по-человечески, как со старым добрым приятелем.
+- Никакого роботизированного официоза ("Здравствуйте", "Чем могу помочь?", "Я языковая модель").
+- Разговаривай естественно: "Здорово", "Да ладно?", "Серьёзно?", "Короче", "Слушай", "О, ништяк", "Красава".
+- ВАЖНО ПРО ПАМЯТЬ ДИАЛОГА:
+  * Всегда помни, о чём вы только что говорили! Если вы обсуждали игру (например, Brawl Stars, персонажа Булла, CS2), ПРОДОЛЖАЙ ТЕМУ разговора, реагируй на его выбор и отвечай по контексту.
+  * НИКОГДА не здоровайся заново в середине разговора ("Здорово!", "Чего как?") — вы уже общаетесь!
+- ВАЖНО ДЛЯ ГОЛОСА: Твой ответ будут слушать УШАМИ через колонку! Поэтому отвечай кратко и живо (1-2 ёмких предложения).
 - Не используй markdown-разметку (никаких звёздочек **, решёток #, списков), пиши только чистый разговорный текст для озвучки.
 `;
 
-// Удаление markdown-символов, чтобы Алиса не читала звёздочки и решётки вслух
+// Кэш сессий прямо в оперативной памяти сервера (для мгновенной памяти между репликами)
+const memoryCache = new Map();
+
+// Очистка текста от markdown-символов
 function cleanTextForSpeech(text) {
   if (!text) return "";
   return text
@@ -26,12 +31,12 @@ function cleanTextForSpeech(text) {
 }
 
 export default async function handler(req, res) {
-  // Проверка работоспособности через браузер
+  // Проверка статуса в браузере
   if (req.method === "GET") {
     return res.status(200).json({
       status: "online",
       service: "Alice Gemini Friend Bot",
-      model: "gemini-flash-lite-latest",
+      active_sessions: memoryCache.size,
       time: new Date().toISOString()
     });
   }
@@ -42,14 +47,16 @@ export default async function handler(req, res) {
 
   try {
     const { request, session, state, version = "1.0" } = req.body || {};
+    const sessionId = (session && session.session_id) || "default_session";
 
-    // 1. Приветствие при старте навыка
+    // 1. Приветствие при старте сессии
     if (session && session.new) {
-      const greeting = "Здорово! Чего расскажешь, как дела?";
+      memoryCache.delete(sessionId); // Сбрасываем старую память новой сессии
+      const greeting = "Здорово! Чего расскажешь, во что поиграем или о чём поболтаем?";
       return res.status(200).json({
         response: {
           text: greeting,
-          tts: "Зд+орово! Чег+о расск+ажешь, как дел+а?",
+          tts: "Зд+орово! Чег+о расск+ажешь, во что поигр+аем +или о чём поболт+аем?",
           end_session: false
         },
         session_state: {
@@ -64,6 +71,7 @@ export default async function handler(req, res) {
     // 2. Команды выхода
     const exitWords = ["пока", "хватит", "стоп", "выход", "отключись", "отмена", "закройся", "до свидания"];
     if (exitWords.includes(userUtterance.toLowerCase())) {
+      memoryCache.delete(sessionId);
       return res.status(200).json({
         response: {
           text: "Давай, на связи! Если что — зови.",
@@ -79,28 +87,47 @@ export default async function handler(req, res) {
     if (!geminiApiKey) {
       return res.status(200).json({
         response: {
-          text: "Слушай, ключа Gemini нет в настройках Vercel. Добавь переменную GEMINI_API_KEY, и поболтаем!",
+          text: "Слушай, ключа Gemini нет в настройках Vercel. Добавь переменную GEMINI_API_KEY!",
           end_session: false
         },
         version
       });
     }
 
-    // 4. История диалога (до 6 последних реплик) для памяти
-    const prevHistory = (state && state.session && state.session.history) || [];
+    // 4. Восстановление истории диалога (проверяем и Яндекс state, и наш кэш в памяти)
+    let history = [];
+    if (state && state.session && Array.isArray(state.session.history) && state.session.history.length > 0) {
+      history = state.session.history;
+    } else if (memoryCache.has(sessionId)) {
+      history = memoryCache.get(sessionId);
+    }
+
+    // Формируем строго чередующиеся реплики для Gemini: user -> model -> user -> model -> user
     const contents = [];
-    for (const h of prevHistory.slice(-6)) {
+    let expectedRole = "user";
+    for (const item of history.slice(-8)) {
+      if (item && item.role === expectedRole && item.text) {
+        contents.push({
+          role: item.role,
+          parts: [{ text: item.text }]
+        });
+        expectedRole = expectedRole === "user" ? "model" : "user";
+      }
+    }
+
+    if (expectedRole === "model") {
       contents.push({
-        role: h.role === "user" ? "user" : "model",
-        parts: [{ text: h.text }]
+        role: "model",
+        parts: [{ text: "Ага, понял." }]
       });
     }
+
     contents.push({
       role: "user",
-      parts: [{ text: userUtterance || "Здорово!" }]
+      parts: [{ text: userUtterance || "Давай продолжим." }]
     });
 
-    // 5. Запрос к Google Gemini (модель gemini-flash-lite-latest — сверхбыстрая и без задержек)
+    // 5. Запрос к Google Gemini Flash-Lite
     let botReply = "";
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 2300);
@@ -140,17 +167,23 @@ export default async function handler(req, res) {
       console.error("Fetch/Timeout error:", err);
     }
 
-    // Вежливый запасной ответ на случай сбоя сети
     if (!botReply) {
       botReply = "Слушай, что-то со связью моргнуло, повтори ещё разок!";
     }
 
-    // 6. Обновляем память сессии
-    const newHistory = [
-      ...prevHistory.slice(-4),
+    // 6. Сохраняем обновлённую историю в память
+    const updatedHistory = [
+      ...history.slice(-6),
       { role: "user", text: userUtterance },
       { role: "model", text: botReply }
     ];
+
+    // Сохраняем в память сервера
+    memoryCache.set(sessionId, updatedHistory);
+    if (memoryCache.size > 200) {
+      const oldestKey = memoryCache.keys().next().value;
+      memoryCache.delete(oldestKey);
+    }
 
     // 7. Отправляем ответ в Яндекс.Диалоги
     return res.status(200).json({
@@ -159,7 +192,7 @@ export default async function handler(req, res) {
         end_session: false
       },
       session_state: {
-        history: newHistory
+        history: updatedHistory
       },
       version
     });
