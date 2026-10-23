@@ -1,0 +1,10 @@
+{
+  "name": "alice-gemini-bot",
+  "version": "1.0.0",
+  "description": "Yandex Alice Bro Bot powered by Google Gemini",
+  "type": "module",
+  "main": "api/index.js",
+  "scripts": {
+    "start": "node api/index.js"
+  }
+}
