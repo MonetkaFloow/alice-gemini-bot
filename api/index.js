@@ -102,46 +102,48 @@ export default async function handler(req, res) {
       parts: [{ text: userUtterance || "Здорово!" }]
     });
 
-    // 5. Запрос к Google Gemini (используем gemini-flash-latest с fallback на gemini-2.5-flash)
+    // 5. Запрос к Google Gemini 3.8 Flash с таймаутом для Яндекс.Диалогов (макс 2.3 сек)
     let botReply = "";
-    const candidateModels = ["gemini-flash-latest", "gemini-2.5-flash", "gemini-2.0-flash"];
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 2300);
 
-    for (const model of candidateModels) {
-      try {
-        const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiApiKey}`;
-        const geminiResponse = await fetch(geminiUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            system_instruction: {
-              parts: [{ text: SYSTEM_INSTRUCTION }]
-            },
-            contents: contents,
-            generationConfig: {
-              temperature: 0.9,
-              maxOutputTokens: 250
-            }
-          })
-        });
-
-        if (geminiResponse.ok) {
-          const geminiData = await geminiResponse.json();
-          const candidate = geminiData.candidates && geminiData.candidates[0];
-          const part = candidate && candidate.content && candidate.content.parts && candidate.content.parts[0];
-          if (part && part.text) {
-            botReply = cleanTextForSpeech(part.text);
-            break; // Успешно получили ответ!
+    try {
+      const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${geminiApiKey}`;
+      const geminiResponse = await fetch(geminiUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({
+          system_instruction: {
+            parts: [{ text: SYSTEM_INSTRUCTION }]
+          },
+          contents: contents,
+          generationConfig: {
+            temperature: 0.9,
+            maxOutputTokens: 150
           }
-        } else {
-          console.error(`Gemini model ${model} error:`, await geminiResponse.text());
+        })
+      });
+      clearTimeout(timeoutId);
+
+      if (geminiResponse.ok) {
+        const geminiData = await geminiResponse.json();
+        const candidate = geminiData.candidates && geminiData.candidates[0];
+        const part = candidate && candidate.content && candidate.content.parts && candidate.content.parts[0];
+        if (part && part.text) {
+          botReply = cleanTextForSpeech(part.text);
         }
-      } catch (err) {
-        console.error(`Fetch error for model ${model}:`, err);
+      } else {
+        const errText = await geminiResponse.text();
+        console.error("Gemini API error:", errText);
       }
+    } catch (err) {
+      clearTimeout(timeoutId);
+      console.error("Fetch/Timeout error:", err);
     }
 
     if (!botReply) {
-      botReply = "Блин, у меня мозги на секунду отключились. Спроси ещё разок, придурок!";
+      botReply = "Чё-то я залип на секунду, повтори ещё раз, придурок!";
     }
 
     // 6. Обновляем память сессии
